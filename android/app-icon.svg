@@ -1,0 +1,11 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" rx="112" fill="#E7E5E4"/>
+  <!-- 相机图标，缩小并居中，留出安全边距 -->
+  <g transform="translate(76, 76) scale(0.7)">
+    <rect x="106" y="146" width="300" height="220" rx="32" stroke="#292524" stroke-width="24" fill="none"/>
+    <circle cx="256" cy="256" r="72" stroke="#292524" stroke-width="24" fill="none"/>
+    <circle cx="350" cy="190" r="16" fill="#292524"/>
+    <path d="M150 146V126C150 115 159 106 170 106H230" stroke="#292524" stroke-width="24" stroke-linecap="round"/>
+  </g>
+</svg>
+

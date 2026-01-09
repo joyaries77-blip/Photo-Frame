@@ -1,0 +1,29 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <!-- 相机图标，缩小并居中，留出安全边距（缩小到70%，居中显示） -->
+    <!-- 相框外框（缩小并居中：原始 106-438, 146-398，缩小70%后居中） -->
+    <path
+        android:pathData="M129,155 L383,155 A22,22 0 0,1 405,177 L405,367 A22,22 0 0,1 383,389 L129,389 A22,22 0 0,1 107,367 L107,177 A22,22 0 0,1 129,155 Z"
+        android:strokeColor="#292524"
+        android:strokeWidth="17"
+        android:fillColor="#00000000"/>
+    <!-- 中心圆形（镜头） -->
+    <path
+        android:pathData="M256,199 A50,50 0 1,1 256,313 A50,50 0 1,1 256,199 Z"
+        android:strokeColor="#292524"
+        android:strokeWidth="17"
+        android:fillColor="#00000000"/>
+    <!-- 右上角小圆点（闪光灯） -->
+    <path
+        android:pathData="M333,163 A11,11 0 1,1 333,185 A11,11 0 1,1 333,163 Z"
+        android:fillColor="#292524"/>
+    <!-- 左上角挂绳 -->
+    <path
+        android:pathData="M129,155 L129,138 A14,14 0 0,1 143,124 L203,124"
+        android:strokeColor="#292524"
+        android:strokeWidth="17"
+        android:fillColor="#00000000"/>
+</vector>

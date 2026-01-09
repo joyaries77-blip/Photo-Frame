@@ -1,0 +1,128 @@
+# 依赖
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 构建输出
+dist/
+build/
+*.local
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Capacitor
+android/app/build/
+android/.gradle/
+android/local.properties
+android/build/
+android/capacitor-cordova-android-plugins/build/
+ios/App/build/
+ios/Pods/
+ios/.xcode.env.local
+*.xcuserdata
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+
+# 日志
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# 临时文件
+*.tmp
+*.temp
+.cache/
+
+# 测试覆盖率
+coverage/
+.nyc_output/
+
+# 其他
+*.pem
+*.key
+*.cert
+
+# 构建产物和发布文件
+release/
+dist/
+build/
+
+# 备份文件夹
+Photo Frame App (更新)/
+Photo Frame App (更新7)/
+Photo Frame App (更新8)/
+Photo Frame App (更新9)/
+ui-update/
+ui-update2/
+
+# 压缩文件
+*.zip
+
+# Electron 构建文件
+electron/
+
+# 证书和密钥文件
+certificates/
+*.mobileprovision
+*.p8
+AuthKey_*.p8
+
+# 临时和测试文件
+voltbuilder-upload.zip
+voltbuilder.json
+volt.yaml
+electron-builder.yml
+
+# 脚本文件（如果需要可以保留，但通常不需要上传）
+*.ps1
+*.bat
+*.cjs
+*.mjs
+!build.bat
+
+# 其他临时文件
+*.txt
+!README.txt
+icon.ico
+Info.plist字体配置示例.xml
+.git-auto-sync.md
+
+# 配置指南文档（排除所有配置文档，只保留 README.md 和 ATTRIBUTIONS.md）
+CODEMAGIC_*.md
+Codemagic_*.md
+VoltBuilder_*.md
+Volt_Build_*.md
+iOS_*.md
+GitHub_*.md
+FLUTTER_*.md
+CAPACITOR_*.md
+*.md
+!README.md
+!ATTRIBUTIONS.md
+

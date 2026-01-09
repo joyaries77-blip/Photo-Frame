@@ -1,0 +1,865 @@
+workflows:
+  ios-workflow:
+    name: iOS Workflow
+    max_build_duration: 120
+    instance_type: mac_mini_m1
+    environment:
+      groups:
+        # 在 Codemagic UI 中创建名为 "ios_code_signing" 的环境变量组
+        # 包含: APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID
+        - ios_code_signing
+      vars:
+        # 应用配置
+        APP_ID: "com.sanskritinput.photoframeapp"
+        XCODE_WORKSPACE: "ios/App/App.xcworkspace"
+        XCODE_SCHEME: "App"
+        BUNDLE_ID: "com.sanskritinput.photoframeapp"
+        # 固定开发团队 ID（来自 Apple Developer 账户）
+        TEAM_ID: "365B7JR87B"
+      node: 22.0.0
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: 安装依赖
+        script: |
+          npm install
+      - name: 安装 iOS 平台
+        script: |
+          # 确保 @capacitor/ios 已安装
+          if ! npm list @capacitor/ios > /dev/null 2>&1; then
+            echo "安装 @capacitor/ios..."
+            npm install @capacitor/ios
+          fi
+          # 检查 iOS 平台是否已正确初始化
+          if [ ! -d "ios" ] || [ ! -d "ios/App" ] || [ ! -f "ios/App/App.xcodeproj/project.pbxproj" ]; then
+            echo "iOS 平台未正确初始化，重新添加..."
+            # 如果 ios 目录存在但不完整，先删除
+            if [ -d "ios" ]; then
+              rm -rf ios
+            fi
+            npx cap add ios
+          else
+            echo "iOS 平台已存在"
+          fi
+      - name: 构建 Web 资源
+        script: |
+          npm run build
+      - name: 同步到 iOS 平台
+        script: |
+          # 确保使用正确的 Bundle ID 同步到 iOS 平台
+          echo "同步到 iOS 平台，Bundle ID: $BUNDLE_ID"
+          # 如果 pod install 失败，会在后续步骤中手动执行
+          npx cap sync ios || echo "cap sync 完成，pod install 将在后续步骤执行"
+          
+          # 同步后立即更新 Bundle ID（如果 cap sync 重置了它）
+          XCODE_PROJECT=$(find ios -name "*.xcodeproj" -type d 2>/dev/null | head -1)
+          if [ -n "$XCODE_PROJECT" ] && [ -f "$XCODE_PROJECT/project.pbxproj" ]; then
+            PBXPROJ_FILE="$XCODE_PROJECT/project.pbxproj"
+            CURRENT_BUNDLE_ID=$(grep -m 1 "PRODUCT_BUNDLE_IDENTIFIER" "$PBXPROJ_FILE" | sed 's/.*PRODUCT_BUNDLE_IDENTIFIER = \([^;]*\);.*/\1/' | sed 's/^[ \t]*//;s/[ \t]*$//' | head -1)
+            if [ "$CURRENT_BUNDLE_ID" != "$BUNDLE_ID" ]; then
+              echo "cap sync 后更新 Bundle ID: $CURRENT_BUNDLE_ID -> $BUNDLE_ID"
+              sed -i '' "s/PRODUCT_BUNDLE_IDENTIFIER = .*;/PRODUCT_BUNDLE_IDENTIFIER = $BUNDLE_ID;/g" "$PBXPROJ_FILE" || true
+            fi
+          fi
+      - name: 安装 CocoaPods 依赖
+        script: |
+          # 检测 iOS 项目结构并安装 Pods
+          if [ -d "ios/App" ]; then
+            cd ios/App
+            pod install
+            cd ../..
+          elif [ -d "ios" ]; then
+            cd ios
+            pod install
+            cd ..
+          else
+            echo "错误：iOS 目录不存在"
+            exit 1
+          fi
+      - name: 验证和配置代码签名
+        script: |
+          echo "=========================================="
+          echo "步骤 1: 验证 Bundle ID 配置"
+          echo "=========================================="
+          
+          # 查找 Xcode 项目文件
+          XCODE_PROJECT=""
+          if [ -d "ios/App/App/App.xcodeproj" ]; then
+            XCODE_PROJECT="ios/App/App/App.xcodeproj"
+          elif [ -d "ios/App/App.xcodeproj" ]; then
+            XCODE_PROJECT="ios/App/App.xcodeproj"
+          else
+            XCODE_PROJECT=$(find ios -name "*.xcodeproj" -type d 2>/dev/null | head -1)
+          fi
+          
+          if [ -z "$XCODE_PROJECT" ] || [ ! -d "$XCODE_PROJECT" ]; then
+            echo "错误：找不到 Xcode 项目文件"
+            exit 1
+          fi
+          
+          echo "✓ 找到 Xcode 项目: $XCODE_PROJECT"
+          
+          # 验证 Bundle ID
+          PBXPROJ_FILE="$XCODE_PROJECT/project.pbxproj"
+          if [ -f "$PBXPROJ_FILE" ]; then
+            CURRENT_BUNDLE_ID=$(grep -m 1 "PRODUCT_BUNDLE_IDENTIFIER" "$PBXPROJ_FILE" | sed 's/.*PRODUCT_BUNDLE_IDENTIFIER = \([^;]*\);.*/\1/' | sed 's/^[ \t]*//;s/[ \t]*$//' | head -1)
+            echo "项目中的 Bundle ID: $CURRENT_BUNDLE_ID"
+            echo "期望的 Bundle ID: $BUNDLE_ID"
+            
+            if [ "$CURRENT_BUNDLE_ID" != "$BUNDLE_ID" ]; then
+              echo "⚠️  警告：Bundle ID 不匹配！正在修复..."
+              sed -i '' "s/PRODUCT_BUNDLE_IDENTIFIER = .*;/PRODUCT_BUNDLE_IDENTIFIER = $BUNDLE_ID;/g" "$PBXPROJ_FILE" || true
+              echo "✓ 已更新 Bundle ID"
+            else
+              echo "✓ Bundle ID 匹配"
+            fi
+          fi
+          
+          echo ""
+          echo "=========================================="
+          echo "步骤 2: 强制设置自动代码签名"
+          echo "=========================================="
+          
+          if [ -f "$PBXPROJ_FILE" ]; then
+            echo "修改项目文件，强制启用自动代码签名..."
+            
+            # 备份原文件
+            cp "$PBXPROJ_FILE" "$PBXPROJ_FILE.bak" || true
+            
+            # 1. 强制设置 CODE_SIGN_STYLE = Automatic
+            sed -i '' 's/CODE_SIGN_STYLE[^=]*=[^;]*Manual[^;]*;/CODE_SIGN_STYLE = Automatic;/g' "$PBXPROJ_FILE" || true
+            sed -i '' 's/"CODE_SIGN_STYLE"[^=]*=[^;]*Manual[^;]*;/"CODE_SIGN_STYLE" = Automatic;/g' "$PBXPROJ_FILE" || true
+            
+            # 2. 强制设置 ProvisioningStyle = Automatic
+            sed -i '' 's/ProvisioningStyle[^=]*=[^;]*Manual[^;]*;/ProvisioningStyle = Automatic;/g' "$PBXPROJ_FILE" || true
+            sed -i '' 's/"ProvisioningStyle"[^=]*=[^;]*Manual[^;]*;/"ProvisioningStyle" = Automatic;/g' "$PBXPROJ_FILE" || true
+            
+            # 3. 删除所有手动指定的 Provisioning Profile
+            sed -i '' '/PROVISIONING_PROFILE_SPECIFIER/d' "$PBXPROJ_FILE" || true
+            sed -i '' '/"PROVISIONING_PROFILE"/d' "$PBXPROJ_FILE" || true
+            sed -i '' '/PROVISIONING_PROFILE[ =]/d' "$PBXPROJ_FILE" || true
+            
+            # 4. 强制设置开发团队 ID
+            TEAM_ID_TO_USE="${TEAM_ID:-365B7JR87B}"
+            echo "设置开发团队 ID: $TEAM_ID_TO_USE"
+            
+            # 先删除所有现有的 DEVELOPMENT_TEAM（避免格式不一致）
+            sed -i '' '/DEVELOPMENT_TEAM[^=]*=/d' "$PBXPROJ_FILE" || true
+            
+            # 在所有 buildSettings = { 后添加 DEVELOPMENT_TEAM
+            # 使用 sed 在所有 buildSettings 块中添加
+            sed -i '' "s/\(buildSettings = {\)/\1\n\t\t\t\tDEVELOPMENT_TEAM = $TEAM_ID_TO_USE;/g" "$PBXPROJ_FILE" || true
+            
+            # 验证设置结果
+            TEAM_COUNT=$(grep -c "DEVELOPMENT_TEAM.*$TEAM_ID_TO_USE" "$PBXPROJ_FILE" || echo "0")
+            if [ "$TEAM_COUNT" -gt 0 ]; then
+              echo "✓ 验证：找到 $TEAM_COUNT 处 Team ID 设置"
+              echo ""
+              echo "Team ID 设置示例（前3个）："
+              grep "DEVELOPMENT_TEAM.*$TEAM_ID_TO_USE" "$PBXPROJ_FILE" | head -3 || true
+            else
+              echo "⚠️  警告：未找到 Team ID 设置，尝试备用方法..."
+              # 备用方法：再次在 buildSettings 中添加（基于 CODE_SIGN_STYLE 行）
+              sed -i '' "s/\(CODE_SIGN_STYLE = Automatic;\)/\1\n\t\t\t\tDEVELOPMENT_TEAM = $TEAM_ID_TO_USE;/g" "$PBXPROJ_FILE" || true
+              TEAM_COUNT=$(grep -c "DEVELOPMENT_TEAM.*$TEAM_ID_TO_USE" "$PBXPROJ_FILE" || echo "0")
+              echo "备用方法后找到 $TEAM_COUNT 处 Team ID 设置"
+            fi
+            
+            # 5. 再次验证并确保所有 buildSettings 都有 CODE_SIGN_STYLE = Automatic
+            # 前面的 sed 命令应该已经处理了，这里是最终确认
+            echo "最终验证代码签名配置..."
+            
+            # 验证修改
+            echo ""
+            echo "验证代码签名配置："
+            if grep -q "CODE_SIGN_STYLE.*Automatic" "$PBXPROJ_FILE"; then
+              AUTO_COUNT=$(grep -c "CODE_SIGN_STYLE.*Automatic" "$PBXPROJ_FILE" || echo "0")
+              echo "✓ 找到 $AUTO_COUNT 处自动代码签名配置"
+            fi
+            
+            if grep -q "CODE_SIGN_STYLE.*Manual" "$PBXPROJ_FILE"; then
+              MANUAL_COUNT=$(grep -c "CODE_SIGN_STYLE.*Manual" "$PBXPROJ_FILE" || echo "0")
+              echo "⚠️  警告：仍有 $MANUAL_COUNT 处手动代码签名配置"
+              # 再次尝试修复
+              sed -i '' 's/.*CODE_SIGN_STYLE.*Manual.*/CODE_SIGN_STYLE = Automatic;/g' "$PBXPROJ_FILE" || true
+            else
+              echo "✓ 没有发现手动代码签名配置"
+            fi
+            
+            # 显示当前配置摘要
+            echo ""
+            echo "当前配置摘要："
+            grep -E "PRODUCT_BUNDLE_IDENTIFIER|CODE_SIGN_STYLE|ProvisioningStyle" "$PBXPROJ_FILE" | head -5 || true
+          fi
+          
+          echo ""
+          echo "=========================================="
+          echo "步骤 3: 验证 Codemagic 环境配置"
+          echo "=========================================="
+          echo "⚠️  重要提示："
+          echo "1. 请在 Codemagic UI 中配置："
+          echo "   - Distribution -> iOS code signing"
+          echo "   - 选择 'Automatic' 签名方式"
+          echo "   - 选择你的 App Store Connect API Key"
+          echo "   - Certificate type: iOS Distribution"
+          echo "   - Provisioning profile type: App Store (或 Ad Hoc)"
+          echo ""
+          echo "2. 确保 Bundle ID '$BUNDLE_ID' 已在 Apple Developer Portal 中注册"
+          echo "3. 确保 API Key 有 Admin 或 Developer 权限"
+          echo ""
+          
+          # 检查环境变量（如果有）
+          if [ -n "$APP_STORE_CONNECT_PRIVATE_KEY" ]; then
+            echo "✓ App Store Connect API 环境变量已配置"
+          else
+            echo "⚠️  未检测到 App Store Connect API 环境变量"
+            echo "   如果 Codemagic UI 中已配置，这属于正常情况"
+          fi
+          
+          echo ""
+          echo "✓ 代码签名配置步骤完成"
+      - name: 构建 IPA
+        script: |
+          echo "=========================================="
+          echo "开始构建 IPA"
+          echo "=========================================="
+          
+          # 查找项目文件
+          XCODE_PROJECT=$(find ios -name "*.xcodeproj" -type d 2>/dev/null | head -1)
+          
+          # 构建前最后确认代码签名配置
+          if [ -n "$XCODE_PROJECT" ] && [ -f "$XCODE_PROJECT/project.pbxproj" ]; then
+            echo "构建前最后确认代码签名配置..."
+            PBXPROJ_FILE="$XCODE_PROJECT/project.pbxproj"
+            
+            # 最后清理一遍手动配置
+            sed -i '' 's/CODE_SIGN_STYLE[^=]*=[^;]*Manual[^;]*;/CODE_SIGN_STYLE = Automatic;/g' "$PBXPROJ_FILE" || true
+            sed -i '' 's/ProvisioningStyle[^=]*=[^;]*Manual[^;]*;/ProvisioningStyle = Automatic;/g' "$PBXPROJ_FILE" || true
+            sed -i '' '/PROVISIONING_PROFILE/d' "$PBXPROJ_FILE" || true
+            
+            echo "✓ 代码签名配置已确认"
+          fi
+          
+          # 自动检测 workspace 路径
+          if [ -d "ios/App/App.xcworkspace" ]; then
+            WORKSPACE_PATH="ios/App/App.xcworkspace"
+          elif [ -d "ios/App.xcworkspace" ]; then
+            WORKSPACE_PATH="ios/App.xcworkspace"
+          else
+            echo "查找 workspace 文件..."
+            WORKSPACE_PATH=$(find ios -name "*.xcworkspace" -type d | head -1)
+            if [ -z "$WORKSPACE_PATH" ]; then
+              echo "错误：找不到 Xcode workspace 文件"
+              exit 1
+            fi
+          fi
+          echo "使用 workspace: $WORKSPACE_PATH"
+          
+          # 查找或创建 export_options.plist 文件
+          EXPORT_OPTIONS_PLIST=""
+          echo "查找 export_options.plist 文件..."
+          
+          # 尝试多个可能的路径
+          if [ -f "ios/export_options.plist" ]; then
+            EXPORT_OPTIONS_PLIST="ios/export_options.plist"
+            echo "找到文件: $EXPORT_OPTIONS_PLIST"
+          elif [ -f "export_options.plist" ]; then
+            EXPORT_OPTIONS_PLIST="export_options.plist"
+            echo "找到文件: $EXPORT_OPTIONS_PLIST"
+          else
+            echo "文件不存在，创建默认 export_options.plist..."
+            mkdir -p ios
+            # 使用 printf 创建文件，避免 YAML 解析问题
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n\t<key>method</key>\n\t<string>development</string>\n\t<key>signingStyle</key>\n\t<string>automatic</string>\n\t<key>compileBitcode</key>\n\t<false/>\n\t<key>stripSwiftSymbols</key>\n\t<true/>\n</dict>\n</plist>\n' > ios/export_options.plist
+            EXPORT_OPTIONS_PLIST="ios/export_options.plist"
+            echo "已创建: $EXPORT_OPTIONS_PLIST"
+          fi
+          
+          echo "使用 export_options.plist: $EXPORT_OPTIONS_PLIST"
+          
+          # 验证 App Store Connect API 环境变量
+          if [ -z "$APP_STORE_CONNECT_PRIVATE_KEY" ] || [ -z "$APP_STORE_CONNECT_KEY_IDENTIFIER" ] || [ -z "$APP_STORE_CONNECT_ISSUER_ID" ]; then
+            echo "错误：缺少 App Store Connect API 环境变量"
+            exit 1
+          fi
+          
+          # 创建临时 .p8 文件供 Codemagic 使用
+          API_KEY_PATH="/tmp/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8"
+          echo "$APP_STORE_CONNECT_PRIVATE_KEY" > "$API_KEY_PATH"
+          chmod 600 "$API_KEY_PATH"
+          echo "✓ API 密钥文件已创建: $API_KEY_PATH"
+          
+          # 检查 Codemagic 是否自动安装了 provisioning profiles
+          PROVISIONING_PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo ""
+          echo "检查 Provisioning Profiles..."
+          if [ -d "$PROVISIONING_PROFILES_DIR" ]; then
+            echo "Provisioning Profiles 目录存在: $PROVISIONING_PROFILES_DIR"
+            PROFILE_COUNT=$(find "$PROVISIONING_PROFILES_DIR" -name "*.mobileprovision" -o -name "*.provisionprofile" 2>/dev/null | wc -l | tr -d ' ')
+            echo "找到 $PROFILE_COUNT 个 profile 文件"
+            
+            # 查找匹配的 profile
+            MATCHING_PROFILES=$(find "$PROVISIONING_PROFILES_DIR" -name "*.mobileprovision" -o -name "*.provisionprofile" 2>/dev/null | xargs grep -l "$BUNDLE_ID" 2>/dev/null || true)
+            if [ -n "$MATCHING_PROFILES" ]; then
+              echo "✓ 找到匹配 Bundle ID '$BUNDLE_ID' 的 profile:"
+              echo "$MATCHING_PROFILES" | while read -r profile; do
+                echo "  - $profile"
+              done
+            else
+              echo "⚠️  未找到匹配 Bundle ID '$BUNDLE_ID' 的 profile"
+              echo "   这可能是正常的，Codemagic 会在构建时自动下载"
+            fi
+          else
+            echo "⚠️  Provisioning Profiles 目录不存在，Codemagic 会在构建时自动创建"
+          fi
+          
+          echo ""
+          echo "使用 App Store Connect API 构建 IPA..."
+          echo "Key ID: $APP_STORE_CONNECT_KEY_IDENTIFIER"
+          echo "Issuer ID: $APP_STORE_CONNECT_ISSUER_ID"
+          echo "Workspace: $WORKSPACE_PATH"
+          echo "Scheme: $XCODE_SCHEME"
+          echo "Export Options: $EXPORT_OPTIONS_PLIST"
+          
+          # 配置 App Store Connect API
+          if [ -z "$APP_STORE_CONNECT_PRIVATE_KEY" ] || [ -z "$APP_STORE_CONNECT_KEY_IDENTIFIER" ] || [ -z "$APP_STORE_CONNECT_ISSUER_ID" ]; then
+            echo "⚠️  警告：App Store Connect API 环境变量未完整配置"
+            echo "   某些功能可能无法正常工作"
+          else
+            API_KEY_PATH="/tmp/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8"
+            echo "$APP_STORE_CONNECT_PRIVATE_KEY" > "$API_KEY_PATH"
+            chmod 600 "$API_KEY_PATH"
+            export APP_STORE_CONNECT_API_KEY_PATH="$API_KEY_PATH"
+            export APP_STORE_CONNECT_API_KEY_IDENTIFIER="$APP_STORE_CONNECT_KEY_IDENTIFIER"
+            export APP_STORE_CONNECT_ISSUER_ID="$APP_STORE_CONNECT_ISSUER_ID"
+            echo "✓ App Store Connect API 密钥已配置"
+            echo "  Key ID: $APP_STORE_CONNECT_KEY_IDENTIFIER"
+            echo "  Issuer ID: $APP_STORE_CONNECT_ISSUER_ID"
+          fi
+          
+          # 使用 use-profiles 配置 provisioning profiles 和获取开发团队
+          DEVELOPMENT_TEAM=""
+          # 如果还没有开发团队 ID，先使用固定的 TEAM_ID 作为默认值
+          if [ -z "$DEVELOPMENT_TEAM" ] || [ "$DEVELOPMENT_TEAM" = "" ]; then
+            DEVELOPMENT_TEAM="${TEAM_ID:-365B7JR87B}"
+            echo "预设开发团队 ID: $DEVELOPMENT_TEAM"
+          fi
+          if [ -n "$XCODE_PROJECT" ] && [ -d "$XCODE_PROJECT" ] && [ -n "$APP_STORE_CONNECT_API_KEY_PATH" ]; then
+            echo ""
+            echo "=========================================="
+            echo "使用 App Store Connect API 配置代码签名"
+            echo "=========================================="
+            echo "项目路径: $XCODE_PROJECT"
+            echo "Bundle ID: $BUNDLE_ID"
+            echo "API Key: $APP_STORE_CONNECT_API_KEY_PATH"
+            echo ""
+            
+            # 使用 use-profiles 配置 provisioning profiles
+            # 注意：use-profiles 会使用 App Store Connect API 自动创建和下载 profile
+            echo "执行 xcode-project use-profiles..."
+            echo "这将使用 App Store Connect API 自动创建/下载匹配的 provisioning profile"
+            USE_PROFILES_SUCCESS=false
+            
+            # 使用 project 配置 profiles
+            # 注意：xcode-project use-profiles 只支持 --project 参数，不支持 --workspace
+            echo "使用 project 配置 profiles..."
+            echo "环境变量检查："
+            echo "  APP_STORE_CONNECT_API_KEY_PATH: ${APP_STORE_CONNECT_API_KEY_PATH:-未设置}"
+            echo "  APP_STORE_CONNECT_KEY_IDENTIFIER: ${APP_STORE_CONNECT_KEY_IDENTIFIER:-未设置}"
+            echo "  APP_STORE_CONNECT_ISSUER_ID: ${APP_STORE_CONNECT_ISSUER_ID:-未设置}"
+            echo "  BUNDLE_ID: $BUNDLE_ID"
+            echo "  TEAM_ID: ${TEAM_ID:-未设置}"
+            echo ""
+            
+            # 确保环境变量已导出，以便 xcode-project 命令可以使用
+            export APP_STORE_CONNECT_API_KEY_PATH
+            export APP_STORE_CONNECT_KEY_IDENTIFIER
+            export APP_STORE_CONNECT_ISSUER_ID
+            
+            xcode-project use-profiles \
+              --project "$XCODE_PROJECT" 2>&1 | tee /tmp/use-profiles-output.log && USE_PROFILES_SUCCESS=true || {
+              echo "⚠️  use-profiles 执行失败，查看日志："
+              tail -50 /tmp/use-profiles-output.log || true
+              echo ""
+              echo "提示：如果 use-profiles 失败，可能是因为："
+              echo "1. Bundle ID '$BUNDLE_ID' 未在 Apple Developer Portal 注册"
+              echo "2. App Store Connect API Key 权限不足（需要 'Developer' 或 'Admin' 权限）"
+              echo "3. API Key 没有权限访问该 Bundle ID"
+              echo "4. 需要手动在 Codemagic UI 中配置 code signing"
+              echo ""
+              echo "将继续尝试使用 -allowProvisioningUpdates 让 Xcode 自动创建 profile..."
+              echo "（这需要 Xcode 能够访问 Apple Developer Portal）"
+            }
+            
+            # 尝试从项目文件中提取开发团队 ID
+            if [ -f "$XCODE_PROJECT/project.pbxproj" ]; then
+              DEVELOPMENT_TEAM=$(grep -m 1 "DEVELOPMENT_TEAM" "$XCODE_PROJECT/project.pbxproj" | sed -E 's/.*DEVELOPMENT_TEAM[^=]*=[^"]*"([^"]*)"[^;]*;.*/\1/' | sed -E 's/.*DEVELOPMENT_TEAM[^=]*=[ ]*([^ ;]*)[ ;]*.*/\1/' | head -1)
+              DEVELOPMENT_TEAM=$(echo "$DEVELOPMENT_TEAM" | tr -d ' ' | tr -d '\t' | tr -d '"')
+              
+              if [ -n "$DEVELOPMENT_TEAM" ] && [ "$DEVELOPMENT_TEAM" != "" ]; then
+                echo "✓ 找到开发团队 ID: $DEVELOPMENT_TEAM"
+              else
+                echo "⚠️  未在项目文件中找到开发团队 ID"
+                
+                # 如果 use-profiles 失败，尝试使用 API 获取团队信息
+                if [ "$USE_PROFILES_SUCCESS" = false ]; then
+                  echo ""
+                  echo "尝试使用 App Store Connect API 获取团队信息..."
+                  # 使用 curl 调用 App Store Connect API 获取团队信息
+                  # 注意：这需要正确的 API 端点
+                  echo "  提示：如果 use-profiles 失败，可能需要检查 API Key 权限和 Bundle ID 注册"
+                fi
+              fi
+            fi
+            
+            # 如果仍然没有团队 ID，尝试从 use-profiles 输出中提取
+            if [ -z "$DEVELOPMENT_TEAM" ] || [ "$DEVELOPMENT_TEAM" = "" ]; then
+              echo ""
+              echo "尝试从 use-profiles 输出中提取团队信息..."
+              if [ -f /tmp/use-profiles-output.log ]; then
+                TEAM_FROM_LOG=$(grep -i "team" /tmp/use-profiles-output.log | grep -oE "[A-Z0-9]{10}" | head -1)
+                if [ -n "$TEAM_FROM_LOG" ]; then
+                  DEVELOPMENT_TEAM="$TEAM_FROM_LOG"
+                  echo "✓ 从日志中提取到团队 ID: $DEVELOPMENT_TEAM"
+                fi
+              fi
+            fi
+          elif [ -z "$APP_STORE_CONNECT_API_KEY_PATH" ]; then
+            echo "⚠️  跳过 use-profiles（API 密钥未配置）"
+          fi
+          
+          # 如果仍然没有团队 ID，尝试再次使用 project 配置
+          if [ -z "$DEVELOPMENT_TEAM" ] || [ "$DEVELOPMENT_TEAM" = "" ]; then
+            echo ""
+            echo "再次尝试使用 project 配置..."
+            if [ -n "$XCODE_PROJECT" ] && [ -d "$XCODE_PROJECT" ]; then
+              xcode-project use-profiles \
+                --project "$XCODE_PROJECT" 2>&1 | tee /tmp/use-profiles-retry.log || true
+              
+              # 再次尝试从项目文件中提取
+              if [ -n "$XCODE_PROJECT" ] && [ -f "$XCODE_PROJECT/project.pbxproj" ]; then
+                DEVELOPMENT_TEAM=$(grep -m 1 "DEVELOPMENT_TEAM" "$XCODE_PROJECT/project.pbxproj" | sed -E 's/.*DEVELOPMENT_TEAM[^=]*=[^"]*"([^"]*)"[^;]*;.*/\1/' | sed -E 's/.*DEVELOPMENT_TEAM[^=]*=[ ]*([^ ;]*)[ ;]*.*/\1/' | head -1)
+                DEVELOPMENT_TEAM=$(echo "$DEVELOPMENT_TEAM" | tr -d ' ' | tr -d '\t' | tr -d '"')
+                if [ -n "$DEVELOPMENT_TEAM" ] && [ "$DEVELOPMENT_TEAM" != "" ]; then
+                  echo "✓ 使用 workspace 后找到开发团队 ID: $DEVELOPMENT_TEAM"
+                fi
+              fi
+            fi
+          fi
+          
+          # 使用 Codemagic 的 build-ipa 命令
+          # 注意：如果 Codemagic UI 中已配置自动签名，此命令应该能够自动处理
+          echo "开始使用 Codemagic build-ipa 构建..."
+          xcode-project build-ipa \
+            --workspace "$WORKSPACE_PATH" \
+            --scheme "$XCODE_SCHEME" \
+            --export-options-plist "$EXPORT_OPTIONS_PLIST" || {
+            
+            echo ""
+            echo "⚠️  build-ipa 失败，使用 xcodebuild 备用方案..."
+            echo "   这通常意味着需要检查 Codemagic UI 中的代码签名配置"
+            echo ""
+            
+            # 备用方案：直接使用 xcodebuild，完全依赖自动签名
+            ARCHIVE_PATH="build/ios/xcarchive/App.xcarchive"
+            mkdir -p "$(dirname "$ARCHIVE_PATH")"
+            
+            echo "步骤 1: 归档项目（使用自动代码签名）..."
+            
+            # 归档前最后检查：如果没有开发团队 ID，尝试再次从项目文件中获取
+            if [ -z "$DEVELOPMENT_TEAM" ] || [ "$DEVELOPMENT_TEAM" = "" ]; then
+              echo ""
+              echo "归档前检查开发团队 ID..."
+              if [ -n "$XCODE_PROJECT" ] && [ -f "$XCODE_PROJECT/project.pbxproj" ]; then
+                DEVELOPMENT_TEAM=$(grep -m 1 "DEVELOPMENT_TEAM" "$XCODE_PROJECT/project.pbxproj" | sed -E 's/.*DEVELOPMENT_TEAM[^=]*=[^"]*"([^"]*)"[^;]*;.*/\1/' | sed -E 's/.*DEVELOPMENT_TEAM[^=]*=[ ]*([^ ;]*)[ ;]*.*/\1/' | head -1)
+                DEVELOPMENT_TEAM=$(echo "$DEVELOPMENT_TEAM" | tr -d ' ' | tr -d '\t' | tr -d '"')
+                
+                if [ -n "$DEVELOPMENT_TEAM" ] && [ "$DEVELOPMENT_TEAM" != "" ]; then
+                  echo "✓ 从项目文件中找到开发团队 ID: $DEVELOPMENT_TEAM"
+                else
+                  # 如果项目文件中没有，使用固定的 TEAM_ID
+                  DEVELOPMENT_TEAM="${TEAM_ID:-365B7JR87B}"
+                  echo "⚠️  项目文件中未找到开发团队 ID，使用固定值: $DEVELOPMENT_TEAM"
+                  echo ""
+                  echo "提示："
+                  echo "- 已在 '验证和配置代码签名' 步骤中设置 Team ID 到项目文件"
+                  echo "- 如果仍然失败，请检查 Bundle ID '$BUNDLE_ID' 是否已在 Apple Developer Portal 注册"
+                fi
+              else
+                # 如果项目文件不存在，使用固定的 TEAM_ID
+                DEVELOPMENT_TEAM="${TEAM_ID:-365B7JR87B}"
+                echo "⚠️  项目文件不存在，使用固定 Team ID: $DEVELOPMENT_TEAM"
+              fi
+            fi
+            
+            echo ""
+            echo "最终使用的开发团队 ID: $DEVELOPMENT_TEAM"
+            
+            # 尝试归档
+            ARCHIVE_SUCCESS=false
+            ARCHIVE_EXIT_CODE=0
+            
+            # 方案 1: 如果有开发团队 ID，使用它
+            if [ -n "$DEVELOPMENT_TEAM" ] && [ "$DEVELOPMENT_TEAM" != "" ]; then
+              echo "使用开发团队 ID: $DEVELOPMENT_TEAM"
+              
+              # 归档前验证项目文件中的 Team ID 设置
+              if [ -n "$XCODE_PROJECT" ] && [ -f "$XCODE_PROJECT/project.pbxproj" ]; then
+                echo ""
+                echo "归档前验证项目文件中的 Team ID..."
+                PBX_TEAM=$(grep -m 1 "DEVELOPMENT_TEAM" "$XCODE_PROJECT/project.pbxproj" | grep -oE "[A-Z0-9]{10}" | head -1)
+                if [ -n "$PBX_TEAM" ]; then
+                  echo "✓ 项目文件中的 Team ID: $PBX_TEAM"
+                  if [ "$PBX_TEAM" != "$DEVELOPMENT_TEAM" ]; then
+                    echo "⚠️  警告：项目文件中的 Team ID ($PBX_TEAM) 与使用的 Team ID ($DEVELOPMENT_TEAM) 不匹配"
+                    echo "   将在归档命令中使用: $DEVELOPMENT_TEAM"
+                  fi
+                else
+                  echo "⚠️  项目文件中未找到 Team ID，将在归档命令中指定"
+                fi
+              fi
+              
+              echo ""
+              echo "归档命令："
+              echo "  workspace: $WORKSPACE_PATH"
+              echo "  scheme: $XCODE_SCHEME"
+              echo "  archivePath: $ARCHIVE_PATH"
+              echo "  DEVELOPMENT_TEAM: $DEVELOPMENT_TEAM"
+              echo "  CODE_SIGN_STYLE: Automatic"
+              echo ""
+              
+              set +o pipefail
+              xcodebuild -workspace "$WORKSPACE_PATH" \
+                -scheme "$XCODE_SCHEME" \
+                -configuration Release \
+                -archivePath "$ARCHIVE_PATH" \
+                CODE_SIGN_STYLE=Automatic \
+                DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+                PROVISIONING_PROFILE_SPECIFIER="" \
+                -allowProvisioningUpdates \
+                archive 2>&1 | tee /tmp/archive.log
+              ARCHIVE_EXIT_CODE=${PIPESTATUS[0]}
+              set -o pipefail
+              
+              if [ $ARCHIVE_EXIT_CODE -eq 0 ]; then
+                ARCHIVE_SUCCESS=true
+                echo "✓ 归档命令执行成功（退出代码: 0）"
+              else
+                echo ""
+                echo "❌ 使用指定团队 ID 归档失败（退出代码: $ARCHIVE_EXIT_CODE）"
+                echo ""
+                echo "查看归档日志中的关键错误信息："
+                echo "--- 搜索 'error:' 和 'failed' ---"
+                grep -i "error\|failed\|requires" /tmp/archive.log | tail -20 || true
+                echo ""
+                echo "--- 最后 100 行完整日志 ---"
+                tail -100 /tmp/archive.log || true
+                echo "--- 日志结束 ---"
+                echo ""
+                echo "常见错误原因："
+                echo "1. Bundle ID '$BUNDLE_ID' 未在 Apple Developer Portal 注册"
+                echo "   访问: https://developer.apple.com/account/resources/identifiers/list"
+                echo "   检查是否存在: $BUNDLE_ID"
+                echo ""
+                echo "2. Team ID '$DEVELOPMENT_TEAM' 与 Bundle ID 不匹配"
+                echo "   确保 Bundle ID 属于这个 Team"
+                echo ""
+                echo "3. Provisioning Profile 未创建或过期"
+                echo "   访问: https://developer.apple.com/account/resources/profiles/list"
+              fi
+            fi
+            
+            # 方案 2: 如果没有开发团队 ID 或方案 1 失败，让 Xcode 完全自动处理
+            if [ "$ARCHIVE_SUCCESS" = false ]; then
+              echo ""
+              echo "未找到开发团队 ID，尝试让 Xcode 自动选择开发团队..."
+              echo "（这将依赖 App Store Connect API 自动创建和管理 Provisioning Profile）"
+              echo ""
+              
+              # 如果仍然没有团队 ID，尝试在项目文件中设置一个占位符
+              # 然后使用 -allowProvisioningUpdates 让 Xcode 自动处理
+              if [ -z "$DEVELOPMENT_TEAM" ] || [ "$DEVELOPMENT_TEAM" = "" ]; then
+                echo "⚠️  警告：未找到开发团队 ID"
+                echo "   将使用 -allowProvisioningUpdates 让 Xcode 自动处理"
+                echo "   这需要 App Store Connect API 正确配置"
+              fi
+              
+              echo "归档命令："
+              echo "  workspace: $WORKSPACE_PATH"
+              echo "  scheme: $XCODE_SCHEME"
+              echo "  archivePath: $ARCHIVE_PATH"
+              if [ -n "$DEVELOPMENT_TEAM" ] && [ "$DEVELOPMENT_TEAM" != "" ]; then
+                echo "  DEVELOPMENT_TEAM: $DEVELOPMENT_TEAM"
+              else
+                echo "  DEVELOPMENT_TEAM: (自动选择)"
+              fi
+              echo ""
+              
+              set +o pipefail
+              # 使用 -allowProvisioningUpdates 允许 Xcode 自动更新 provisioning profiles
+              ARCHIVE_CMD="xcodebuild -workspace \"$WORKSPACE_PATH\" \
+                -scheme \"$XCODE_SCHEME\" \
+                -configuration Release \
+                -archivePath \"$ARCHIVE_PATH\" \
+                CODE_SIGN_STYLE=Automatic \
+                -allowProvisioningUpdates"
+              
+              if [ -n "$DEVELOPMENT_TEAM" ] && [ "$DEVELOPMENT_TEAM" != "" ]; then
+                ARCHIVE_CMD="$ARCHIVE_CMD DEVELOPMENT_TEAM=\"$DEVELOPMENT_TEAM\""
+              fi
+              
+              ARCHIVE_CMD="$ARCHIVE_CMD PROVISIONING_PROFILE_SPECIFIER=\"\" archive"
+              
+              eval "$ARCHIVE_CMD" 2>&1 | tee /tmp/archive-auto.log
+              ARCHIVE_EXIT_CODE=${PIPESTATUS[0]}
+              set -o pipefail
+              
+              if [ $ARCHIVE_EXIT_CODE -eq 0 ]; then
+                ARCHIVE_SUCCESS=true
+                echo "✓ 归档命令执行成功（退出代码: 0）"
+              else
+                echo ""
+                echo "❌ 自动选择团队也失败（退出代码: $ARCHIVE_EXIT_CODE）"
+                echo "查看归档日志："
+                echo "--- 最后 50 行日志 ---"
+                tail -50 /tmp/archive-auto.log || true
+                echo "--- 日志结束 ---"
+                echo ""
+                echo "常见问题："
+                echo "1. Bundle ID '$BUNDLE_ID' 可能未在 Apple Developer Portal 注册"
+                echo "2. App Store Connect API Key 可能权限不足"
+                echo "3. 可能需要手动在 Xcode 项目中设置开发团队"
+              fi
+            fi
+            
+            if [ "$ARCHIVE_SUCCESS" = false ]; then
+              echo ""
+              echo "❌ 归档失败"
+              echo ""
+              echo "诊断信息："
+              echo "  - App Store Connect API 配置："
+              if [ -n "$APP_STORE_CONNECT_API_KEY_PATH" ]; then
+                echo "    ✓ API Key 文件已创建: $APP_STORE_CONNECT_API_KEY_PATH"
+                echo "    ✓ Key ID: $APP_STORE_CONNECT_KEY_IDENTIFIER"
+                echo "    ✓ Issuer ID: $APP_STORE_CONNECT_ISSUER_ID"
+              else
+                echo "    ❌ API Key 未配置"
+              fi
+              echo "  - 开发团队 ID："
+              if [ -n "$DEVELOPMENT_TEAM" ] && [ "$DEVELOPMENT_TEAM" != "" ]; then
+                echo "    ✓ $DEVELOPMENT_TEAM"
+              else
+                echo "    ❌ 未找到（这可能是正常的，Xcode 会自动选择）"
+              fi
+              echo "  - Bundle ID: $BUNDLE_ID"
+              echo ""
+              echo "请检查以下配置："
+              echo "1. ✅ 确保三个环境变量都已正确配置："
+              echo "   - APP_STORE_CONNECT_PRIVATE_KEY"
+              echo "   - APP_STORE_CONNECT_KEY_IDENTIFIER"
+              echo "   - APP_STORE_CONNECT_ISSUER_ID"
+              echo "2. ✅ 确保 Bundle ID '$BUNDLE_ID' 已在 Apple Developer Portal 注册"
+              echo "   访问: https://developer.apple.com/account/resources/identifiers/list"
+              echo "3. ✅ 确保 App Store Connect API Key 有足够的权限"
+              echo "   - 访问: https://appstoreconnect.apple.com -> Users and Access -> Keys"
+              echo "   - 权限至少需要 'Developer'，推荐 'Admin'"
+              echo "4. ✅ 验证 API Key 是否有效"
+              echo "   - 确认 Key ID 和 Issuer ID 正确"
+              echo "   - 确认 .p8 文件内容完整（包括 BEGIN 和 END 行）"
+              echo ""
+              echo "如果以上都正确，可能是以下原因："
+              echo "- Bundle ID 未在 Apple Developer Portal 注册"
+              echo "- API Key 权限不足"
+              echo "- Apple Developer 账户未激活或过期"
+              exit 1
+            fi
+            
+            # 验证归档文件完整性
+            echo ""
+            echo "验证归档文件完整性..."
+            
+            # 查找实际的归档文件（xcodebuild 可能会生成不同名称的归档）
+            ACTUAL_ARCHIVE=""
+            echo "搜索归档文件..."
+            
+            # 首先检查预期路径
+            if [ -d "$ARCHIVE_PATH" ]; then
+              ACTUAL_ARCHIVE="$ARCHIVE_PATH"
+              echo "✓ 找到预期路径的归档: $ACTUAL_ARCHIVE"
+            else
+              # 搜索 build/ios/xcarchive 目录下的所有归档
+              FOUND_ARCHIVES=$(find build/ios/xcarchive -name "*.xcarchive" -type d 2>/dev/null)
+              if [ -n "$FOUND_ARCHIVES" ]; then
+                ACTUAL_ARCHIVE=$(echo "$FOUND_ARCHIVES" | head -1)
+                echo "✓ 找到归档文件: $ACTUAL_ARCHIVE"
+              else
+                # 搜索当前目录下的所有归档
+                FOUND_ARCHIVES=$(find . -name "*.xcarchive" -type d -maxdepth 3 2>/dev/null)
+                if [ -n "$FOUND_ARCHIVES" ]; then
+                  ACTUAL_ARCHIVE=$(echo "$FOUND_ARCHIVES" | head -1)
+                  echo "✓ 找到归档文件: $ACTUAL_ARCHIVE"
+                fi
+              fi
+            fi
+            
+            # 如果仍然找不到，检查归档是否真的失败了
+            if [ -z "$ACTUAL_ARCHIVE" ] || [ ! -d "$ACTUAL_ARCHIVE" ]; then
+              echo ""
+              echo "❌ 归档文件不存在或归档失败"
+              echo ""
+              echo "检查的路径："
+              echo "  - $ARCHIVE_PATH"
+              echo "  - build/ios/xcarchive/*.xcarchive"
+              echo ""
+              echo "归档命令退出状态："
+              if [ "$ARCHIVE_SUCCESS" = true ]; then
+                echo "  - 归档命令报告成功，但找不到归档文件"
+              else
+                echo "  - 归档命令报告失败"
+              fi
+              echo ""
+              echo "请查看上面的归档日志以获取详细错误信息"
+              exit 1
+            fi
+            
+            # 检查归档文件的关键组件
+            echo ""
+            echo "检查归档文件结构..."
+            if [ ! -f "$ACTUAL_ARCHIVE/Info.plist" ]; then
+              echo "❌ 归档文件损坏：缺少 Info.plist"
+              echo "归档目录内容："
+              ls -la "$ACTUAL_ARCHIVE/" || true
+              exit 1
+            fi
+            echo "  ✓ Info.plist 存在"
+            
+            if [ ! -d "$ACTUAL_ARCHIVE/Products" ]; then
+              echo "❌ 归档文件损坏：缺少 Products 目录"
+              echo "归档目录内容："
+              ls -la "$ACTUAL_ARCHIVE/" || true
+              exit 1
+            fi
+            echo "  ✓ Products 目录存在"
+            
+            APP_BUNDLE=$(find "$ACTUAL_ARCHIVE/Products" -name "*.app" -type d | head -1)
+            if [ -z "$APP_BUNDLE" ]; then
+              echo "❌ 归档文件损坏：找不到 .app 文件"
+              echo "Products 目录内容："
+              ls -la "$ACTUAL_ARCHIVE/Products/" || true
+              exit 1
+            fi
+            echo "  ✓ App 包存在: $(basename "$APP_BUNDLE")"
+            
+            echo ""
+            echo "✓ 归档文件验证通过"
+            echo "  归档路径: $ACTUAL_ARCHIVE"
+            echo "  App 包: $APP_BUNDLE"
+            ARCHIVE_PATH="$ACTUAL_ARCHIVE"
+            
+            # 步骤 2: 导出 IPA
+            echo ""
+            echo "步骤 2: 导出 IPA..."
+            
+            # 使用已验证的归档路径
+            ACTUAL_ARCHIVE_PATH="$ARCHIVE_PATH"
+            echo "使用已验证的归档文件: $ACTUAL_ARCHIVE_PATH"
+            
+            # 尝试获取团队 ID 用于 export_options.plist
+            # 如果没有，export-options.plist 中的自动签名会处理
+            if [ -z "$DEVELOPMENT_TEAM" ] || [ "$DEVELOPMENT_TEAM" = "" ]; then
+              echo "未找到开发团队 ID，export_options.plist 将使用自动签名模式"
+            else
+              echo "使用开发团队 ID 更新 export_options.plist: $DEVELOPMENT_TEAM"
+              if grep -q "<key>teamID</key>" "$EXPORT_OPTIONS_PLIST"; then
+                sed -i '' "/<key>teamID<\/key>/,/<string>.*<\/string>/s/<string>.*<\/string>/<string>$DEVELOPMENT_TEAM<\/string>/" "$EXPORT_OPTIONS_PLIST" || true
+              else
+                # 如果 teamID 不存在，使用 awk 添加它（避免 YAML 多行字符串解析问题）
+                TEMP_PLIST=$(mktemp)
+                awk -v team="$DEVELOPMENT_TEAM" '/<key>signingStyle<\/key>/ {print; print "\t<key>teamID</key>"; print "\t<string>" team "</string>"; next} {print}' "$EXPORT_OPTIONS_PLIST" > "$TEMP_PLIST" && mv "$TEMP_PLIST" "$EXPORT_OPTIONS_PLIST" && echo "✓ 已添加 teamID: $DEVELOPMENT_TEAM" || echo "⚠️  添加 teamID 失败，将使用自动签名模式"
+              fi
+            fi
+            
+            echo "导出 IPA..."
+            echo "归档路径: $ACTUAL_ARCHIVE_PATH"
+            echo "导出选项: $EXPORT_OPTIONS_PLIST"
+            echo "导出路径: build/ios/ipa"
+            
+            mkdir -p "build/ios/ipa"
+            
+            # 执行导出并捕获退出状态
+            EXPORT_EXIT_CODE=0
+            xcodebuild -exportArchive \
+              -archivePath "$ACTUAL_ARCHIVE_PATH" \
+              -exportOptionsPlist "$EXPORT_OPTIONS_PLIST" \
+              -exportPath "build/ios/ipa" 2>&1 | tee /tmp/export.log || EXPORT_EXIT_CODE=$?
+            
+            # 检查导出是否成功
+            if [ $EXPORT_EXIT_CODE -ne 0 ]; then
+              echo ""
+              echo "❌ 导出 IPA 失败（退出代码: $EXPORT_EXIT_CODE）"
+              echo "查看导出日志："
+              tail -50 /tmp/export.log || true
+              echo ""
+              echo "常见问题排查："
+              echo "1. 检查归档文件是否完整"
+              echo "2. 检查 export_options.plist 配置是否正确"
+              echo "3. 检查代码签名配置"
+              exit 1
+            fi
+            
+            # 验证 IPA 文件是否真的生成了
+            IPA_FILES=$(find build/ios/ipa -name "*.ipa" -type f 2>/dev/null)
+            if [ -z "$IPA_FILES" ]; then
+              echo ""
+              echo "❌ 导出命令成功，但未找到 IPA 文件"
+              echo "检查导出目录："
+              ls -la build/ios/ipa/ || true
+              echo ""
+              echo "查看完整导出日志："
+              cat /tmp/export.log || true
+              exit 1
+            fi
+            
+            echo ""
+            echo "✓ IPA 导出成功"
+            
+            # 显示 IPA 文件信息
+            echo ""
+            echo "=========================================="
+            echo "IPA 文件信息"
+            echo "=========================================="
+            echo "找到以下 IPA 文件："
+            for IPA_FILE in $IPA_FILES; do
+              if [ -f "$IPA_FILE" ]; then
+                IPA_SIZE=$(ls -lh "$IPA_FILE" | awk '{print $5}')
+                IPA_ABSPATH=$(cd "$(dirname "$IPA_FILE")" && pwd)/$(basename "$IPA_FILE")
+                echo "  📦 $IPA_FILE"
+                echo "     大小: $IPA_SIZE"
+                echo "     完整路径: $IPA_ABSPATH"
+              fi
+            done
+            echo ""
+            echo "IPA 文件路径: build/ios/ipa/"
+            echo "文件列表:"
+            ls -lh build/ios/ipa/ || true
+          }
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
+    publishing:
+      email:
+        recipients:
+          - user@example.com  # 替换为您的邮箱
+        notify:
+          success: true
+          failure: false
+      scripts:
+        - name: 上传到 App Store Connect（可选）
+          script: |
+            # 如果需要自动上传到 App Store Connect，取消下面的注释
+            # xcode-project upload-to-app-store \
+            #   --ipa-path "build/ios/ipa/*.ipa" \
+            #   --app-store-connect-api-key "$APP_STORE_CONNECT_API_KEY_ID" \
+            #   --app-store-connect-issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
+            #   --app-store-connect-api-key-path "$APP_STORE_CONNECT_API_KEY_PATH"
+
